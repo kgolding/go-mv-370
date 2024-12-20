@@ -3,7 +3,8 @@ package mv370
 import (
 	"errors"
 	"fmt"
-	"log"
+	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,19 +15,27 @@ type Mv370 struct {
 	host     string
 	username string
 	password string
+	log      *slog.Logger
 }
 
 type ReadLinesFn func(line string) (done bool, err error)
 
-func New(host string, username string, password string) (Mv370, error) {
+func New(host string, username string, password string, logger *slog.Logger) (Mv370, error) {
+	if logger == nil {
+		// Create a dummy logger
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	mv := Mv370{
 		host:     host,
 		username: username,
 		password: password,
+		log:      logger,
 	}
+	mv.log.Info("New Mv370", "host", host)
 	return mv, mv.Check()
 }
 
+// Check creates a session, authenticates and runs the info command to check the MV370 can be contacted
 func (mv Mv370) Check() error {
 	return mv.Session().
 		Sendln("info").
@@ -48,9 +57,9 @@ func (mv Mv370) SendSMS(tel string, message string) error {
 }
 
 type Message struct {
-	Tel     string    `json:"tel"`
-	Message string    `json:"message"`
-	Time    time.Time `json:"time"`
+	Tel  string    `json:"tel"`
+	Text string    `json:"text"`
+	Time time.Time `json:"time"`
 }
 
 func (mv Mv370) ReadSMS() ([]Message, error) {
@@ -91,10 +100,10 @@ func (mv Mv370) ReadSMS() ([]Message, error) {
 		} else if line == "0" {
 			return true, nil
 		} else if l := len(messages); l > 0 {
-			if len(messages[l-1].Message) > 0 {
-				messages[l-1].Message += "\n"
+			if len(messages[l-1].Text) > 0 {
+				messages[l-1].Text += "\n"
 			}
-			messages[l-1].Message += line
+			messages[l-1].Text += line
 		}
 		return false, nil
 	}
@@ -113,13 +122,20 @@ func (mv Mv370) ReadSMS() ([]Message, error) {
 
 const timeout = 10 * time.Second
 
+// Session facilitates an authenticated sessions, and provides chainable methods to send/receive commands
 type Session struct {
 	conn *telnet.Conn
 	err  error
+	log  *slog.Logger
 }
 
+// Session creates an authenticated connection to the MV370 for further use
 func (mv Mv370) Session() *Session {
-	s := &Session{}
+	s := &Session{
+		log: mv.log,
+	}
+
+	mv.log.Info("New session")
 
 	s.conn, s.err = telnet.DialTimeout("tcp", mv.host, timeout)
 	if s.err != nil {
@@ -133,14 +149,16 @@ func (mv Mv370) Session() *Session {
 		Sendln(mv.username).
 		Expect("password").
 		Sendln(mv.password).
-		Expect("command:")
+		WaitLnContains("command:")
 }
 
+// Close a session, by sending "logout" and then closing the TCP connection
 func (s *Session) Close() error {
 	if s.conn != nil {
 		s.conn.Write([]byte("logout\n"))
 		s.conn.Close()
 	}
+	s.log.Info("Session closed")
 	return s.err
 }
 
@@ -149,37 +167,34 @@ func (s *Session) Expect(d ...string) *Session {
 	if s.err != nil {
 		return s
 	}
-	log.Printf("Expect A: %s", d)
+	defer s.log.Debug("Expect", "delims", d, "result", s.err == nil)
+
 	s.err = s.conn.SetReadDeadline(time.Now().Add(timeout))
 	if s.err != nil {
 		s.err = errors.Join(s.err, fmt.Errorf("expect '%s'", strings.Join(d, "/")))
 		return s
 	}
-	log.Printf("Expect B: %s", d)
 	s.err = s.conn.SkipUntil(d...)
-	log.Printf("Expect C: %s: %v", d, s.err)
 	if s.err != nil {
-		log.Printf("Expect ERR: %v", s.err)
 		s.err = errors.Join(s.err, fmt.Errorf("expect '%s'", strings.Join(d, "/")))
 	}
 	return s
 }
 
+// ExpectLnContains read the next line and expects it to contain str
 func (s *Session) ExpectLnContains(str string) *Session {
 	if s.err != nil {
 		return s
 	}
-	log.Printf("ExpectLnContains A: %s", str)
+	defer s.log.Debug("ExpectLnContains", "str", str, "result", s.err == nil)
+
 	s.err = s.conn.SetReadDeadline(time.Now().Add(timeout))
 	if s.err != nil {
 		return s
 	}
-	log.Printf("ExpectLnContains B: %s", str)
 	var line string
 	line, s.err = s.conn.ReadString('\n')
-	log.Printf("ExpectLnContains C: %s: %v", line, s.err)
 	if s.err != nil {
-		log.Printf("ExpectLnContains ERR: %v", s.err)
 		s.err = errors.Join(s.err, fmt.Errorf("ExpectLnContains '%s'", line))
 	}
 	if !strings.Contains(line, str) {
@@ -188,23 +203,23 @@ func (s *Session) ExpectLnContains(str string) *Session {
 	return s
 }
 
+// WaitLnContains reads the lines until a line contains str
 func (s *Session) WaitLnContains(str string) *Session {
 	if s.err != nil {
 		return s
 	}
-	log.Printf("WaitLnContains A: %s", str)
+	defer s.log.Debug("WaitLnContains", "str", str, "result", s.err == nil)
+
 	s.err = s.conn.SetReadDeadline(time.Now().Add(timeout))
 	if s.err != nil {
 		return s
 	}
-	log.Printf("WaitLnContains B: %s", str)
 	var line string
 	for {
-		line, s.err = s.conn.ReadString('\n')
-		log.Printf("WaitLnContains C: %s: %v", line, s.err)
+		line, s.err = s.conn.ReadString(telnet.LF)
 		if s.err != nil {
-			log.Printf("WaitLnContains ERR: %v", s.err)
 			s.err = errors.Join(s.err, fmt.Errorf("WaitLnContains '%s'", line))
+			return s
 		}
 		if strings.Contains(line, str) {
 			return s
@@ -212,50 +227,30 @@ func (s *Session) WaitLnContains(str string) *Session {
 	}
 }
 
-// func (s *Session) ReadLn(fn ReadCallback) *Session {
-// 	if s.err != nil {
-// 		return s
-// 	}
-// 	s.err = s.conn.SetReadDeadline(time.Now().Add(timeout))
-// 	if s.err != nil {
-// 		s.err = errors.Join(s.err, errors.New("readln"))
-// 		return s
-// 	}
-// 	var b []byte
-// 	b, s.err = s.conn.ReadUntil("\n")
-// 	log.Printf("ReadLn A: '%s': %v", string(b), s.err)
-// 	if s.err != nil {
-// 		log.Printf("ReadLn ERR: %v", s.err)
-// 		s.err = errors.Join(s.err, fmt.Errorf("readln"))
-// 	} else {
-// 		s.err = fn(string(b))
-// 	}
-// 	return s
-// }
-
+// ReadLines read lines anc call fn with line, until fn returns an error or done
 func (s *Session) ReadLines(fn ReadLinesFn) *Session {
 	if s.err != nil {
 		return s
 	}
 	var line string
 	var done bool
+	count := 0
+
+	defer s.log.Debug("ReadLines", "count", count, "result", s.err == nil)
 
 	for {
 		s.err = s.conn.SetReadDeadline(time.Now().Add(timeout))
 		if s.err != nil {
-			s.err = errors.Join(s.err, errors.New("ReadLinesUntil"))
+			s.err = errors.Join(s.err, errors.New("ReadLines"))
 			return s
 		}
 		line, s.err = s.conn.ReadString(0x0A)
 		line = strings.TrimRight(line, "\n\r")
-		log.Printf("ReadLinesUntil A: '%s': %v", line, s.err)
 		if s.err != nil {
-			log.Printf("ReadLinesUntil ERR: %v", s.err)
-			s.err = errors.Join(s.err, fmt.Errorf("ReadLinesUntil"))
+			s.err = errors.Join(s.err, fmt.Errorf("ReadLines"))
 		} else {
-			log.Printf("ReadLinesUntil B: '%s': %v", line, s.err)
+			count++
 			done, s.err = fn(line)
-			log.Printf("ReadLinesUntil C: %t, '%s': %v", done, line, s.err)
 			if done {
 				return s
 			}
@@ -263,6 +258,7 @@ func (s *Session) ReadLines(fn ReadLinesFn) *Session {
 	}
 }
 
+// Sendln sends str
 func (s *Session) Sendln(str string) *Session {
 	if s.err != nil {
 		return s
@@ -279,10 +275,11 @@ func (s *Session) Sendln(str string) *Session {
 	if s.err != nil {
 		s.err = errors.Join(s.err, fmt.Errorf("sendln '%s'", str))
 	}
-	log.Printf("Sendln '%s'", str)
+	s.log.Info("Sendln", "str", str)
 	return s
 }
 
+// Send sends the raw bytes
 func (s *Session) Send(b []byte) *Session {
 	if s.err != nil {
 		return s
@@ -296,6 +293,6 @@ func (s *Session) Send(b []byte) *Session {
 	if s.err != nil {
 		s.err = errors.Join(s.err, fmt.Errorf("sendln %X", b))
 	}
-	log.Printf("Send %X", b)
+	s.log.Info("Send", "b", b)
 	return s
 }

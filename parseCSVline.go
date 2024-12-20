@@ -7,6 +7,10 @@ import (
 // ParseCSVLine parses a single CSV line and removes optional quotes per field without using the csv library.
 func ParseCSVLine(line string) ([]string, error) {
 	var fields []string
+	if line == "" {
+		return fields, nil
+	}
+
 	var field strings.Builder
 	inQuotes := false
 
