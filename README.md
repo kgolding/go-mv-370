@@ -4,12 +4,12 @@ This package provides a simple way to send and receive SMS messages on a Portech
 
 ## Minimum example
 ```golang
-	c, err := mv370.New(host, username, password, nil)
-   	if err != nil {
-		panic(err)
-	}
-    err = c.SendSMS(tel, text)
-   	if err != nil {
-		panic(err)
-	}
+c, err := mv370.New(host, username, password, nil)
+if err != nil {
+    panic(err)
+}
+err = c.SendSMS(tel, text)
+if err != nil {
+    panic(err)
+}
 ```
